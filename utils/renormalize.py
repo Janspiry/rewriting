@@ -50,6 +50,11 @@ def from_url(url, target='zc', size=None):
     return from_image(im, target, size=size)
 
 
+def from_url_image(url, target='zc', size=None):
+    image_data = re.sub('^data:image/.+;base64,', '', url)
+    im = PIL.Image.open(io.BytesIO(base64.b64decode(image_data)))
+    return im.convert('RGB')
+
 def renormalizer(source='zc', target='zc'):
     '''
     Returns a function that imposes a standard normalization on

@@ -502,7 +502,7 @@ class ProgressiveGanRewriter(object):
         source_acts = self.context_acts(source_outputs)
         unchanged_outputs = self.target_model(source_outputs)
         unchanged_acts = self.target_acts(unchanged_outputs)
-        target_acts, bounds = paste_clip_at_center(
+        target_acts, bounds, masks = paste_clip_at_center_withmask(
             unchanged_acts, obj_acts, centered_location(area),
             obj_area if self.alpha_area else None)
         full_target_acts = target_acts
@@ -517,7 +517,7 @@ class ProgressiveGanRewriter(object):
             unchanged_outputs, target_acts, target_bounds)
         viz_out = self.merge_target_output(
             unchanged_outputs, full_target_acts, None)
-        return goal_in, goal_out, viz_out, bounds
+        return goal_in, goal_out, viz_out, bounds, masks
 
     def rgb_from_selection(self, imgnum, mask):
         area = renormalize.from_url(mask, target='pt', size=self.x_shape[2:])[0]
@@ -592,6 +592,14 @@ class ProgressiveGanRewriter(object):
             topk, rq = tally.tally_topk_and_quantile(
                 image_max_sel, self.zds, k=k)
         return topk.result()[1], rq
+
+
+    def render_object_pt(self, target_output, obj_area=None, box=None):
+        with torch.no_grad():
+            imgdata = self.rendered_image(
+                self.rendering_model(target_output))
+        return renormalize.as_image(imgdata[0], source='pt')
+
 
     def render_object(self, target_output, obj_area=None, box=None):
         with torch.no_grad():
@@ -794,13 +802,34 @@ def paste_clip_at_center(source, clip, center, area=None):
     return target, (t, l, b, r)
 
 
+def paste_clip_at_center_withmask(source, clip, center, area=None):
+    target = source.clone()
+    # clip = clip[:,:,:target.shape[2],:target.shape[3]]
+    t, l = (max(0, min(e - s, c - s // 2))
+            for s, c, e in zip(clip.shape[2:], center, source.shape[2:]))
+    b, r = t + clip.shape[2], l + clip.shape[3]
+    # TODO: consider copying over a subset of channels.
+    target[:, :, t:b, l:r] = clip if area is None else (
+        (1 - area)[None, None, :, :].to(target.device) * target[:, :, t:b, l:r] + area[None, None, :, :].to(target.device) * clip)
+    
+    masks = torch.zeros_like(target)
+    # area = (area>0.1).type_as(target)
+    masks[:, :, t:b, l:r] = clip
+    # print(masks.shape)
+    return target, (t, l, b, r), masks
+
 def crop_clip_to_bounds(source, target, bounds):
     t, l, b, r = bounds
     vr, hr = [ts // ss for ts, ss in zip(target.shape[2:], source.shape[2:])]
     st, sl, sb, sr = t // vr, l // hr, -(-b // vr), -(-r // hr)
     tt, tl, tb, tr = st * vr, sl * hr, sb * vr, sr * hr
-    cs, ct = source[:, :, st:sb, sl:sr], target[:, :, tt:tb, tl:tr]
-    return cs, ct, (st, sl, sb, sr), (tt, tl, tb, tr)
+    print(source[:, :, st:sb, sl:sr].shape,  target[:, :, tt:tb, tl:tr].shape)
+
+    # cs, ct = source[:, :, st:sb, sl:sr], target[:, :, tt:tb, tl:tr]
+    # return cs, ct, (st, sl, sb, sr), (tt, tl, tb, tr)
+    source[:, :, st:sb, sl:sr] = 1
+    target[:, :, st:sb, sl:sr] = 1
+    return source, target, (st, sl, sb, sr), (tt, tl, tb, tr)
 
 
 def projected_conv(weight, direction):

@@ -5,20 +5,26 @@ import json
 from utils import renormalize, imgviz
 from utils import show, labwidget, paintwidget
 from collections import OrderedDict
-
-
+import numpy as np
+from PIL import Image
 ##########################################################################
 # UI
 ##########################################################################
 
 class GanRewriteApp(labwidget.Widget):
 
-    def __init__(self, gw, mask_dir=None, size=256, num_canvases=9):
+    def __init__(self, gw, mask_dir=None, size=256, num_canvases=9, save_img_sum=0):
         super().__init__(style=dict(border="0", padding="0",
                                     display="inline-block", width="1000px",
                                     left="0", margin="0"
                                     ), className='rwa')
-        self.gw = gw
+        self.save_img_copy = None
+        self.save_img_paste = None
+        self.save_img_mask = None
+        self.save_img_sum = save_img_sum
+        self.images_origin = []
+
+        self.gw = gw 
         self.size = size
         self.savedir = self.gw.cachedir if mask_dir is None else mask_dir
         self.original_model = copy.deepcopy(gw.model)
@@ -29,10 +35,10 @@ class GanRewriteApp(labwidget.Widget):
         self.loss_out = labwidget.Div()
         self.query_out = labwidget.Div()
         self.copy_canvas = paintwidget.PaintWidget(
-            image='', width=self.size * 0.75, height=self.size * 0.75
+            image='', width=self.size *1, height=self.size *1
         ).on('mask', self.change_copy_mask)
         self.paste_canvas = paintwidget.PaintWidget(
-            image='', width=self.size * 0.75, height=self.size * 0.75,
+            image='', width=self.size *1, height=self.size *1,
             opacity=0.0, oneshot=True,
         ).on('mask', self.change_paste_mask)
         self.object_out = labwidget.Div(
@@ -83,14 +89,14 @@ class GanRewriteApp(labwidget.Widget):
                                           ).on('click', self.query)
         self.context_querybtn = labwidget.Button('Search', style=inline
                                                  ).on('click', self.keytray_query)
-        self.highlight_btn = labwidget.Button('Show Context Matches', style=inline
-                                              ).on('click', self.toggle_highlight)
+        # self.highlight_btn = labwidget.Button('Show Context Matches', style=inline
+        #                                       ).on('click', self.toggle_highlight)
         self.original_btn = labwidget.Button('Toggle Original', style=inline
                                              ).on('click', self.toggle_original)
         self.object_btn = labwidget.Button('Copy', style=inline
                                            ).on('click', self.pick_object)
-        self.key_btn = labwidget.Button('Add to Context', style=inline
-                                        ).on('click', self.key_add)
+        # self.key_btn = labwidget.Button('Add to Context', style=inline
+        #                                 ).on('click', self.key_add)
         self.paste_btn = labwidget.Button('Paste', style=inline
                                           ).on('click', self.paste)
         self.snap_btn = labwidget.Button('Snap'
@@ -131,9 +137,12 @@ class GanRewriteApp(labwidget.Widget):
         self.canvas_array = []
         self.snap_image_array = []
         for i in range(num_canvases):
+            img = self.gw.render_image(i)
+            self.images_origin.append(img)
             self.canvas_array.append(paintwidget.PaintWidget(
                 image=renormalize.as_url(
-                    self.gw.render_image(i)),
+                    self.images_origin[i]
+                    ),
                 # width=self.size * 3 // 4, height=self.size * 3 // 4
                 width=self.size, height=self.size
             ).on('mask', self.change_mask))
@@ -270,6 +279,9 @@ class GanRewriteApp(labwidget.Widget):
         images = self.gw.render_image_batch(self.sel,
                                             self.query_key if self.query_vis else None, level,
                                             border_color=[255, 255, 255])
+        self.images_origin = images
+        # print('images', len(images))
+        # print(len(self.images_origin))
         if self.show_original:
             with torch.no_grad():
                 self.gw.model.load_state_dict(saved_state_dict)
@@ -428,8 +440,18 @@ class GanRewriteApp(labwidget.Widget):
         self.copy_canvas.image = renormalize.as_url(
             self.request_mask(thickness=3))
         self.copy_canvas.mask = mask
-        self.show_msg('picked object')
+        
+        self.save_img_copy = self.images_origin[self.current_mask_item]
+        # print(self.save_img_copy)
+        self.show_msg('save_img_copy')
+        # self.show_msg('picked object')
+    
+    def get_bound(self, arr):
+        idxs = np.where(arr>0)
+        t, b = min(idxs[0]), max(idxs[0])
+        l, r = min(idxs[1]), max(idxs[1])
 
+        return t, l, b, r
     def request_mask(self, field='object', index=None, **kwargs):
         # For generating high-resolution figures: directly visualize a mask.
         if field not in self.request:
@@ -442,9 +464,14 @@ class GanRewriteApp(labwidget.Widget):
             imgnum, mask = self.request[field][index]
         else:
             imgnum, mask = self.request[field]
-        area = (renormalize.from_url(mask, target='pt',
-                                     size=self.gw.x_shape[2:])[0] > 0.25)
+        area = (renormalize.from_url(mask, target='pt', size=self.gw.x_shape[2:])[0] > 0.25)
         imgout = self.gw.render_image(imgnum, mask=area, **kwargs)
+        self.save_mask_copy = renormalize.from_url_image(mask, size=self.gw.x_shape[2:])
+        self.save_mask_copy_np = np.array(self.save_mask_copy.convert("L"))
+        self.bound_copy = self.get_bound(self.save_mask_copy_np)
+
+        # (t, l, b, r) = self.bound_copy
+        # self.save_img_mask =  self.save_img_mask.crop((l,t,r,b))
         return imgout
 
     def revert(self):
@@ -472,10 +499,32 @@ class GanRewriteApp(labwidget.Widget):
 
     def exec_paste(self):
         imgnum, mask = self.request['paste']
-        goal_in, goal_out, viz_out, bounds = self.gw.paste_from_selection(
+        goal_in, goal_out, viz_out, bounds, masks = self.gw.paste_from_selection(
             imgnum, mask, self.obj_acts, self.obj_area)
-        self.paste_canvas.image = renormalize.as_url(
-            self.gw.render_object(viz_out, box=bounds))
+        img_data = self.gw.render_object(viz_out, box=bounds)
+        self.paste_canvas.image = renormalize.as_url(img_data)
+
+        self.save_mask_paste = renormalize.from_url_image(mask, size=self.gw.x_shape[2:])
+
+        self.save_mask_paste_np = np.array(self.save_mask_paste.convert("L"))
+        self.bound_paste = self.get_bound(self.save_mask_paste_np)
+        t_copy, l_copy, b_copy, r_copy = self.bound_copy 
+        h_copy, w_copy = b_copy-t_copy, r_copy-l_copy
+        t_paste, l_paste, b_paste, r_paste = self.bound_paste 
+        h_center_paste = (t_paste + b_paste)//2
+        w_center_paste = (l_paste + r_paste)//2
+
+        # print('self.bound_paste:', self.bound_paste)
+        # print('self.bound_copy:', self.bound_copy)
+        self.save_mask_end_np =  self.save_mask_copy_np.copy()
+        try:
+            self.save_mask_end_np[h_center_paste-h_copy//2:h_center_paste+h_copy//2,w_center_paste-w_copy//2:w_center_paste+w_copy//2] =  self.save_mask_copy_np[t_copy:t_copy+h_copy//2*2,l_copy:l_copy+w_copy//2*2]
+        except:
+            self.show_msg(f'bounding error')
+        self.save_mask_end =  Image.fromarray(self.save_mask_end_np.astype('uint8')).convert('RGB')
+        self.save_img_paste = self.gw.render_object(viz_out)
+        # print(self.save_img_paste)
+        
 
     def exec_erase(self):
         if 'paste' not in self.request:
@@ -548,11 +597,19 @@ class GanRewriteApp(labwidget.Widget):
         self.show_msg(f'overfitted into model')
 
     def save(self):
-        if not self.saved_list.value:
-            return
-        self.save_as_name(self.saved_list.value)
-        self.saved_list.choices = self.saved_names()
-        self.show_msg('saved as ' + self.saved_list.value)
+        self.save_img_sum += 1
+        # if not self.saved_list.value:
+        #     return
+        # self.save_as_name(self.saved_list.value)
+        # self.saved_list.choices = self.saved_names()
+        # self.show_msg('saved as ' + self.saved_list.value)
+        # self.show_msg('saved img')
+        self.save_img_copy.save('{}/{}_O.png'.format(self.savedir, self.save_img_sum))
+        self.save_img_paste.save('{}/{}_F.png'.format(self.savedir, self.save_img_sum))
+        self.save_mask_copy.save('{}/{}_CM.png'.format(self.savedir, self.save_img_sum))
+        self.save_mask_paste.save('{}/{}_PM.png'.format(self.savedir, self.save_img_sum))
+        self.save_mask_end.save('{}/{}_M.png'.format(self.savedir, self.save_img_sum))
+        self.show_msg('savedir:{}, save_img_sum:{}'.format(self.savedir, self.save_img_sum))
 
     def tryload(self):
         if not self.saved_list.value:
@@ -617,15 +674,7 @@ class GanRewriteApp(labwidget.Widget):
           width:{(self.size + 2) * 1.5}px;
           vertical-align:top;
           "><!-- bottom of left -->
-        <div style="display:block;
-          padding-top:20px;
-          padding-bottom:20px;
-          vertical-align:top;
-          text-align:center">{h(self.key_btn)} &nbsp; {h(self.highlight_btn)}
-        </div>
-        <div style="display:inline-block; background: #f2f2f2;">
-        {h(self.context_out)}
-        </div>
+
         </div><!-- contxt tray -->
         <hr style="border: 1px solid gray">
         <div style="display:block;
@@ -641,14 +690,14 @@ class GanRewriteApp(labwidget.Widget):
         {h(self.paste_btn)}
         </div>
         <div style="display:inline-block;
-          width:{self.size * 0.75}px;
-          height:{self.size * 0.75}px;
+          width:{self.size * 1}px;
+          height:{self.size * 1}px;
           vertical-align:top;
           text-align:center;
           background:#f2f2f2">{h(self.copy_canvas)}</div>
         <div style="display:inline-block;
-          width:{self.size * 0.75}px;
-          height:{self.size * 0.75}px;
+          width:{self.size * 1}px;
+          height:{self.size * 1}px;
           vertical-align:top;
           text-align:center;
           background:#f2f2f2">{h(self.paste_canvas)}</div>
